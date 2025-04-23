@@ -6,85 +6,439 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from config import BOT_TOKEN
 from states import TradeForm
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 import database as db
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery
+
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Главное меню
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Добавить сделку")],
+        [KeyboardButton(text="❌ Закрыть сделку")],
+        [KeyboardButton(text="📂 Открытые сделки")],
+        [KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="ℹ️ Помощь")]
+    ],
+    resize_keyboard=True
+)
+
 # Команда /start - приветственное сообщение
 @dp.message(F.text == "/start")
 async def start_handler(message: Message):
-    await message.answer("Привет! Я трейд-журнал. Напиши /newtrade чтобы добавить сделку.")
+    await message.answer("Привет! Я трейд-журнал. Выбери действие:", reply_markup=main_menu)
 
-# Команда /newtrade - начало ввода новой сделки
-@dp.message(F.text == "/newtrade")
+
+
+def render_trade_template(data: dict) -> str:
+    return (
+        f"📝 Черновик сделки\n\n"
+        f"🪙 Монета: {data.get('coin') or '-'}\n"
+        f"⏱ Таймфрейм: {data.get('timeframe') or '-'}\n"
+        f"📥 Вход: {data.get('entry') or '-'}\n"
+        f"💵 Сумма: {data.get('usdt_amount') or '-'}\n"
+        f"📉 Комиссия: {data.get('fee_entry_percent') or '-'}\n"
+        f"🎯 Цель: {data.get('targets') or '-'}\n"
+        f"🛑 Стоп: {data.get('stop') or '-'}\n"
+        f"📚 Причина: {data.get('reason') or '-'}\n"
+        f"📌 Статус: {data.get('status') or '-'}\n"
+    )
+
+# Кнопка "Добавить сделку"
+@dp.message(F.text == "➕ Добавить сделку")
 async def new_trade(message: Message, state: FSMContext):
-    await state.set_state(TradeForm.coin)
-    await message.answer("Монета (например, ETH/USDT):")
+    await state.set_state(TradeForm.creating_trade)
+    # создаём начальные пустые данные
+    await state.update_data(
+        coin=None, timeframe=None, entry=None,
+        usdt_amount=None, fee_entry_percent=None,
+        targets=None, stop=None, reason=None,
+        status=None, close_price=None, pnl=None,
+        tags=None, comment=None
+    )
 
-# Ввод монеты
-@dp.message(TradeForm.coin)
-async def trade_coin(message: Message, state: FSMContext):
+    # отправляем шаблон
+    text = render_trade_template(await state.get_data())
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
+
+
+#Обрботчик нажатия на кнопку "Монета"
+@dp.callback_query(F.data == "set_coin")
+async def set_coin_callback(callback: CallbackQuery, state: FSMContext):
+    coins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "TON/USDT", "DOGE/USDT", "XRP/USDT", "Другая монета"]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=coin, callback_data=f"coin:{coin}")] for coin in coins
+    ])
+    await callback.message.edit_text("Выбери монету:", reply_markup=keyboard)
+
+#Обработчик нажатия на одну из монет
+@dp.callback_query(F.data.startswith("coin:"))
+async def coin_chosen(callback: CallbackQuery, state: FSMContext):
+    coin = callback.data.split(":")[1]
+    if coin == "Другая монета":
+        await state.set_state(TradeForm.coin_manual)
+        await callback.message.edit_text("Введи монету вручную (например, BTC/USDT):")
+    else:
+        await state.update_data(coin=coin)
+        await state.set_state(TradeForm.creating_trade)
+
+        # Обновлённый шаблон
+        text = render_trade_template(await state.get_data())
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+            [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+            [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+            [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+            [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+            [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+            [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+            [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+            [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+            [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+        ])
+        await callback.message.edit_text(text, reply_markup=markup)
+
+
+#Обработчик тектового ввода монеты
+@dp.message(TradeForm.coin_manual)
+async def trade_coin_manual(message: Message, state: FSMContext):
     await state.update_data(coin=message.text)
-    await state.set_state(TradeForm.timeframe)
-    await message.answer("Таймфрейм (1H, 4H, D1):")
+    await state.set_state(TradeForm.creating_trade)
+
+    # Возвращаемся в меню с обновлённым шаблоном
+    text = render_trade_template(await state.get_data())
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
 
 # Ввод таймфрейма
-@dp.message(TradeForm.timeframe)
-async def trade_timeframe(message: Message, state: FSMContext):
-    await state.update_data(timeframe=message.text)
-    await state.set_state(TradeForm.entry)
-    await message.answer("Цена входа ($):")
+@dp.callback_query(F.data == "set_timeframe")
+async def set_timeframe_callback(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1H", callback_data="tf:1H"), InlineKeyboardButton(text="4H", callback_data="tf:4H")],
+        [InlineKeyboardButton(text="1D", callback_data="tf:1D"), InlineKeyboardButton(text="1W", callback_data="tf:1W")]
+    ])
+    await callback.message.edit_text("Выбери таймфрейм:", reply_markup=keyboard)
 
-# Ввод цены входа
+#Обработка таймфрейма
+@dp.callback_query(F.data.startswith("tf:"))
+async def timeframe_chosen(callback: CallbackQuery, state: FSMContext):
+    tf = callback.data.split(":")[1]
+    await state.update_data(timeframe=tf)
+    await state.set_state(TradeForm.creating_trade)
+
+    # Обновлённый шаблон и возврат в меню
+    text = render_trade_template(await state.get_data())
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await callback.message.edit_text(text, reply_markup=markup)
+
+# Кнопка "Цена входа"
+@dp.callback_query(F.data == "set_entry")
+async def set_entry_callback(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TradeForm.entry)
+    await callback.message.edit_text("Введи цену входа ($):")
+
+# Кнопка суммы сделки
+@dp.callback_query(F.data == "set_usdt")
+async def set_usdt_callback(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TradeForm.usdt_amount)
+    await callback.message.edit_text("Введи сумму сделки в USDT:")
+
+# Пользователь вручную вводит цену входа
 @dp.message(TradeForm.entry)
 async def trade_entry(message: Message, state: FSMContext):
-    await state.update_data(entry=float(message.text))
-    await state.set_state(TradeForm.usdt_amount)
-    await message.answer("💵 Введи сумму сделки в USDT:")
+    try:
+        entry_price = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введи корректную цену входа ($).")
+        return
 
-# Ввод суммы сделки
+    await state.update_data(entry=entry_price)
+    await state.set_state(TradeForm.creating_trade)
+
+    # Обновляем шаблон
+    data = await state.get_data()
+    await message.answer(
+        render_trade_template(data),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+            [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+            [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+            [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+            [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+            [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+            [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+            [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+            [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+            [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+        ])
+    )
+
+
+# Пользователь вручную вводит сумму сделки
 @dp.message(TradeForm.usdt_amount)
 async def trade_usdt_amount(message: Message, state: FSMContext):
-    await state.update_data(usdt_amount=float(message.text))
-    await state.set_state(TradeForm.fee_entry)
-    await message.answer("📉 Введи комиссию при входе (%):")
+    try:
+        amount = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введи корректную сумму в USDT.")
+        return
 
-# Ввод комиссии на вход
-@dp.message(TradeForm.fee_entry)
-async def trade_fee_entry(message: Message, state: FSMContext):
-    await state.update_data(fee_entry_percent=float(message.text))
+    await state.update_data(usdt_amount=amount)
+    await state.set_state(TradeForm.creating_trade)
+
+    # Обновляем шаблон
+    data = await state.get_data()
+    await message.answer(
+        render_trade_template(data),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+            [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+            [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+            [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+            [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+            [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+            [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+            [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+            [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+            [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+        ])
+    )
+
+# Хэндлер кнопки "Комиссия"
+# При нажатии на кнопку — показ вариантов выбора
+@dp.callback_query(F.data == "set_fee")
+async def set_fee_callback(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="0.1%", callback_data="fee:0.1"), InlineKeyboardButton(text="0.18%", callback_data="fee:0.18")],
+        [InlineKeyboardButton(text="Другой процент", callback_data="fee:custom")]
+    ])
+    await callback.message.edit_text("Выбери комиссию при входе:", reply_markup=keyboard)
+
+# Обработка выбранной комиссии
+# Пользователь нажал одну из кнопок с комиссией
+@dp.callback_query(F.data.startswith("fee:"))
+async def fee_chosen(callback: CallbackQuery, state: FSMContext):
+    fee_value = callback.data.split(":")[1]
+
+    if fee_value == "custom":
+        await state.set_state(TradeForm.fee_entry_custom)
+        await callback.message.edit_text("Введи комиссию вручную (%):")
+    else:
+        await state.update_data(fee_entry_percent=float(fee_value))
+        await state.set_state(TradeForm.creating_trade)
+
+        # Возврат к шаблону после выбора
+        text = render_trade_template(await state.get_data())
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+            [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+            [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+            [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+            [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+            [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+            [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+            [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+            [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+            [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+        ])
+        await callback.message.edit_text(text, reply_markup=markup)
+
+# Если пользователь вручную вводит значение комиссии
+@dp.message(TradeForm.fee_entry_custom)
+async def fee_entry_custom_manual(message: Message, state: FSMContext):
+    try:
+        fee = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введи корректное число.")
+        return
+
+    await state.update_data(fee_entry_percent=fee)
+    await state.set_state(TradeForm.creating_trade)
+
+    # Возврат к шаблону
+    text = render_trade_template(await state.get_data())
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
+
+
+# Обработчик кнопки цели
+@dp.callback_query(F.data == "set_targets")
+async def set_targets_callback(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TradeForm.targets)
-    await message.answer("Цель (пример: 2500 / 2700):")
+    await callback.message.edit_text("Введи цели (например: 2500 / 2700):")
 
-# Ввод целей
+# Обработчик ввода цели
 @dp.message(TradeForm.targets)
 async def trade_targets(message: Message, state: FSMContext):
     await state.update_data(targets=message.text)
-    await state.set_state(TradeForm.stop)
-    await message.answer("Стоп ($):")
+    await state.set_state(TradeForm.creating_trade)
 
-# Ввод стопа
+    data = await state.get_data()
+    text = render_trade_template(data)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
+
+
+# Обработчик кнопки стопа
+@dp.callback_query(F.data == "set_stop")
+async def set_stop_callback(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TradeForm.stop)
+    await callback.message.edit_text("Введи стоп ($):")
+
+# Обработчик ввода стопа
 @dp.message(TradeForm.stop)
 async def trade_stop(message: Message, state: FSMContext):
-    await state.update_data(stop=float(message.text))
-    await state.set_state(TradeForm.reason)
-    await message.answer("Причина входа:")
+    try:
+        stop = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введи число.")
+        return
 
-# Ввод причины входа
+    await state.update_data(stop=stop)
+    await state.set_state(TradeForm.creating_trade)
+
+    data = await state.get_data()
+    text = render_trade_template(data)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
+
+# Обработчик кнопки причины входа
+@dp.callback_query(F.data == "set_reason")
+async def set_reason_callback(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TradeForm.reason)
+    await callback.message.edit_text("Напиши причину входа:")
+
+# Обработчик ввод причины входа
 @dp.message(TradeForm.reason)
 async def trade_reason(message: Message, state: FSMContext):
     await state.update_data(reason=message.text)
-    await state.set_state(TradeForm.status)
-    await message.answer("Статус: В позиции / Закрыто с прибылью / Закрыто по стопу / Закрыто вручную")
+    await state.set_state(TradeForm.creating_trade)
 
-# Ввод статуса
-@dp.message(TradeForm.status)
-async def trade_status(message: Message, state: FSMContext):
-    await state.update_data(status=message.text)
-    await state.set_state(TradeForm.close_price)
-    await message.answer("Цена закрытия ($), если применимо. Или напиши -")
+    data = await state.get_data()
+    text = render_trade_template(data)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+    await message.answer(text, reply_markup=markup)
+
+# Обработка кнопки "Статус"
+@dp.callback_query(F.data == "set_status")
+async def set_status_callback(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📍 В позиции", callback_data="status:В позиции")],
+        [InlineKeyboardButton(text="✅ Закрыто с прибылью", callback_data="status:Закрыто с прибылью")],
+        [InlineKeyboardButton(text="🛑 Закрыто по стопу", callback_data="status:Закрыто по стопу")],
+        [InlineKeyboardButton(text="✋ Закрыто вручную", callback_data="status:Закрыто вручную")]
+    ])
+    await callback.message.edit_text("Выбери статус сделки:", reply_markup=keyboard)
+
+# Обработка выбранного статуса
+@dp.callback_query(F.data.startswith("status:"))
+async def status_chosen(callback: CallbackQuery, state: FSMContext):
+    status = callback.data.split(":", 1)[1]
+    await state.update_data(status=status)
+
+    # Остаёмся на шаге создания сделки
+    await state.set_state(TradeForm.creating_trade)
+
+    # Отрисовка шаблона
+    data = await state.get_data()
+    text = render_trade_template(data)
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪙 Монета", callback_data="set_coin")],
+        [InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="set_timeframe")],
+        [InlineKeyboardButton(text="📥 Цена входа", callback_data="set_entry")],
+        [InlineKeyboardButton(text="💵 USDT", callback_data="set_usdt")],
+        [InlineKeyboardButton(text="📉 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="🎯 Цель", callback_data="set_targets")],
+        [InlineKeyboardButton(text="🛑 Стоп", callback_data="set_stop")],
+        [InlineKeyboardButton(text="📚 Причина", callback_data="set_reason")],
+        [InlineKeyboardButton(text="📌 Статус", callback_data="set_status")],
+        [InlineKeyboardButton(text="✅ Сохранить сделку", callback_data="save_trade")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=markup)
 
 # Ввод цены закрытия
 @dp.message(TradeForm.close_price)

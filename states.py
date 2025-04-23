@@ -1,20 +1,22 @@
 from aiogram.fsm.state import StatesGroup, State
 
 class TradeForm(StatesGroup):
-    coin = State()                # Монета (например, ETH/USDT)
-    timeframe = State()           # Таймфрейм (например, 1H, 4H, D1)
-    entry = State()               # Цена входа
-    usdt_amount = State()         # 💵 Сумма сделки в USDT
-    fee_entry = State()           # 📉 Комиссия при входе (%)
-    targets = State()             # Цель (одна или несколько)
-    stop = State()                # Стоп-лосс
-    reason = State()              # Причина входа
-    status = State()              # Статус: в позиции, закрыто и т.д.
-    close_price = State()         # Цена выхода (если есть)
-    pnl = State()                 # Прибыль/убыток (%)
-    tags = State()                # Теги (#TON, #пробой, #откат и т.д.)
-    comment = State()             # Комментарий
-
-    close_trade_id = State()      # 🔹 Шаг 1: пользователь выбирает ID сделки для закрытия
-    close_price_input = State()   # 🔹 Шаг 2: вводит цену закрытия
-    fee_exit = State()            # 🔹 Шаг 3: вводит комиссию выхода (%)
+    creating_trade = State()          # Общий режим создания сделки
+    coin = State()                    # Выбор монеты
+    coin_manual = State()             # Ввод монеты вручную
+    timeframe = State()              # Таймфрейм
+    entry = State()                  # Цена входа
+    usdt_amount = State()            # Сумма сделки в USDT
+    fee_entry = State()              # Комиссия на вход
+    fee_entry_custom = State()       # Ручная комиссия на вход
+    targets = State()                # Цели
+    stop = State()                   # Стоп
+    reason = State()                 # Причина входа
+    status = State()                 # Статус сделки
+    close_price = State()            # Цена закрытия
+    pnl = State()                    # PnL
+    tags = State()                   # Теги
+    comment = State()                # Комментарий
+    close_trade_id = State()
+    close_price_input = State()
+    fee_exit = State()
