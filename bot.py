@@ -544,34 +544,6 @@ async def save_comment_and_trade(message: Message, state: FSMContext):
 
 
 
-
-
-
-# Ввод тегов
-@dp.message(TradeForm.tags)
-async def trade_tags(message: Message, state: FSMContext):
-    await state.update_data(tags=message.text)
-    await state.set_state(TradeForm.comment)
-    await message.answer("Комментарий (или -):")
-
-# Ввод комментария и сохранение сделки в базу
-@dp.message(TradeForm.comment)
-async def trade_comment(message: Message, state: FSMContext):
-    comment = message.text.strip()
-    if comment == "-":
-        comment = ""
-    await state.update_data(comment=comment)
-
-    data = await state.get_data()
-    await db.insert_trade(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        data=data
-    )
-
-    await message.answer("✅ Сделка сохранена!\n\nХочешь статистику? Напиши /stats")
-    await state.clear()
-
 # Команда /stats - статистика по сделкам
 @dp.message(F.text == "/stats")
 async def stats_handler(message: Message):
