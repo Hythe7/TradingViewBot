@@ -59,3 +59,13 @@ async def insert_trade(user_id, chat_id, data: dict):
         ))
         await db.commit()
 
+# Получение всех открытых сделок пользователя, отсортированных по дате
+async def get_open_trades(user_id: int):
+    async with aiosqlite.connect("trades.db") as db:
+        cursor = await db.execute('''
+            SELECT id, coin, usdt_amount
+            FROM trades
+            WHERE user_id = ? AND status = 'открыта'
+            ORDER BY created_at ASC
+        ''', (user_id,))
+        return await cursor.fetchall()

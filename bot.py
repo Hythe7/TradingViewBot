@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from config import BOT_TOKEN
-from states import TradeForm
+from states import TradeForm, CloseDealForm
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 import database as db
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -19,7 +19,6 @@ dp = Dispatcher(storage=MemoryStorage())
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Добавить сделку")],
-        [KeyboardButton(text="❌ Закрыть сделку")],
         [KeyboardButton(text="📂 Открытые сделки")],
         [KeyboardButton(text="📊 Статистика")],
         [KeyboardButton(text="ℹ️ Помощь")]
@@ -32,6 +31,7 @@ main_menu = ReplyKeyboardMarkup(
 async def start_handler(message: Message):
     await message.answer("Привет! Я трейд-журнал. Выбери действие:", reply_markup=main_menu)
 
+# Черновик-шаблон для добавления новой сделки
 def render_trade_template(data: dict) -> str:
     return (
         f"📝 Черновик сделки\n\n"
@@ -45,6 +45,47 @@ def render_trade_template(data: dict) -> str:
         f"📚 Причина: {data.get('reason') or '-'}\n"
         f"📌 Статус: {data.get('status') or '-'}\n"
     )
+
+# Черновик-шаблон для закрытия сделки
+
+async def render_trade_info_message(callback_or_message, trade_id: int):
+    async with aiosqlite.connect("trades.db") as db:
+        cursor = await db.execute('''
+            SELECT coin, timeframe, entry, targets, stop, usdt_amount, fee_entry_percent, reason, created_at
+            FROM trades
+            WHERE id = ?
+        ''', (trade_id,))
+        trade = await cursor.fetchone()
+
+    if not trade:
+        await callback_or_message.answer("❌ Сделка не найдена.")
+        return
+
+    coin, tf, entry, targets, stop, amount, fee, reason, created = trade
+    text = (
+        f"🧾 Сделка #{trade_id}\n\n"
+        f"🪙 Монета: #{coin}\n"
+        f"⏱ Таймфрейм: {tf or '-'}\n"
+        f"📥 Вход: ${entry:.2f}\n"
+        f"💵 Сумма: {amount} USDT\n"
+        f"📉 Комиссия: {fee}%\n"
+        f"🎯 Цель: {targets or '-'}\n"
+        f"🛑 Стоп: {stop or '-'}\n"
+        f"📚 Причина: {reason or '-'}\n"
+        f"📅 Дата: {created.split()[0]}"
+    )
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔒 Закрыть сделку", callback_data=f"start_close:{trade_id}")],
+        [InlineKeyboardButton(text="🔙 Назад к списку", callback_data="back_to_open_trades")]
+    ])
+
+    if isinstance(callback_or_message, CallbackQuery):
+        await callback_or_message.message.edit_text(text, reply_markup=markup)
+    else:
+        await callback_or_message.answer(text, reply_markup=markup)
+
+
 
 async def show_trade_draft(message_or_callback, state: FSMContext):
     data = await state.get_data()
@@ -481,6 +522,7 @@ async def finalize_trade(source: Message | CallbackQuery, state: FSMContext):
         data["profit_usdt"] = round(profit, 2)
         data["fee_exit_percent"] = exit_fee
     else:
+        
         data["close_price"] = None
         data["pnl"] = None
         data["profit_usdt"] = None
@@ -526,170 +568,326 @@ async def save_comment_and_trade(message: Message, state: FSMContext):
     await finalize_trade(message, state)
 
 
+@dp.message(F.text == "📂 Открытые сделки")
+async def open_trades_menu(message: Message):
+    trades = await db.get_open_trades(message.from_user.id)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Команда /stats - статистика по сделкам
-@dp.message(F.text == "/stats")
-async def stats_handler(message: Message):
-    total, avg_pnl, wins, total_profit = await db.get_stats(message.from_user.id)
-
-    if total == 0 or total is None:
-        await message.answer("😕 Пока нет ни одной сделки. Добавь её через /newtrade")
+    if not trades:
+        await message.answer("😎 У вас нет открытых сделок.")
         return
 
-    avg_pnl = avg_pnl or 0
-    wins = wins or 0
-    total_profit = total_profit or 0
-    winrate = (wins / total * 100)
+    # Формируем инлайн-кнопки
+    buttons = []
+    for trade_id, coin, usdt_amount in trades:
+        text = f"{coin} - {usdt_amount:.2f} USDT"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"openinfo:{trade_id}")])
 
-    await message.answer(
-        f"📊 Твоя статистика:\n\n"
-        f"Всего сделок: {total}\n"
-        f"Средний PnL: {avg_pnl:.2f}%\n"
-        f"Winrate: {winrate:.1f}%\n"
-        f"💰 Общий профит: {total_profit:.2f} USDT"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(f"📂 У вас {len(trades)} открытых сделок:", reply_markup=keyboard)
+
+
+# Кнопка просмотра открытые сделки
+@dp.message(F.text == "📂 Открытые сделки")
+async def open_trades_menu(message: Message):
+    trades = await db.get_open_trades(message.from_user.id)
+
+    if not trades:
+        await message.answer("😎 У вас нет открытых сделок.")
+        return
+
+    # Формируем инлайн-кнопки
+    buttons = []
+    for trade_id, coin, usdt_amount in trades:
+        text = f"{coin} - {usdt_amount:.2f} USDT"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"openinfo:{trade_id}")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(f"📂 У вас {len(trades)} открытых сделок:", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("openinfo:"))
+async def show_trade_info(callback: CallbackQuery):
+    trade_id = int(callback.data.split(":")[1])
+    await render_trade_info_message(callback, trade_id)
+
+# Закрытие открытой сделки
+async def show_close_draft(message_or_callback, state: FSMContext):
+    data = await state.get_data()
+    trade = data["selected_trade"]
+
+    close_price = data.get("close_price") or "-"
+    close_fee = data.get("close_fee") or "-"
+
+    text = (
+        f"🔒 Закрытие сделки\n\n"
+        f"🪙 Монета: {trade['coin']}\n"
+        f"📥 Цена входа: {trade['entry']}\n"
+        f"📅 Дата входа: {trade['created_at'].split()[0]}\n\n"
+        f"📉 Цена закрытия: {close_price}\n"
+        f"📊 Комиссия выхода: {close_fee}%\n"
     )
 
-# Команда /open - выводит открытые сделки
-@dp.message(F.text == "/open")
-async def view_open_trades(message: Message):
-    open_trades = await db.get_user_open_trades(message.from_user.id)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📉 Ввести цену закрытия", callback_data="set_close_price")],
+        [InlineKeyboardButton(text="📊 Ввести комиссию", callback_data="set_close_fee")],
+        [InlineKeyboardButton(text="✅ Подтвердить закрытие", callback_data="confirm_close_trade")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_info:{trade['id']}")]
+    ])
 
-    if not open_trades:
-        await message.answer("🟢 У тебя нет открытых сделок.")
+    if isinstance(message_or_callback, CallbackQuery):
+        await message_or_callback.message.edit_text(text, reply_markup=markup)
+    else:
+        await message_or_callback.answer(text, reply_markup=markup)
+
+# Обработка кнопки назад в закрытии открытой сделки
+@dp.callback_query(F.data.startswith("back_to_info:"))
+async def back_to_trade_info(callback: CallbackQuery, state: FSMContext):
+    trade_id = int(callback.data.split(":")[1])
+    await callback.answer()  # Закрыть "loading..."
+    await render_trade_info_message(callback, trade_id)
+
+@dp.callback_query(F.data.startswith("start_close:"))
+async def start_close_trade(callback: CallbackQuery, state: FSMContext):
+    trade_id = int(callback.data.split(":")[1])
+
+    # Получаем ВСЕ необходимые поля для дальнейших расчетов
+    async with aiosqlite.connect("trades.db") as db_conn:
+        cursor = await db_conn.execute('''
+            SELECT id, coin, entry, usdt_amount, fee_entry_percent, created_at
+            FROM trades
+            WHERE id = ?
+        ''', (trade_id,))
+        row = await cursor.fetchone()
+
+    if not row:
+        await callback.message.answer("❌ Сделка не найдена.")
         return
 
-    response = "🧾 Открытые сделки:\n\n"
-    for i, trade in enumerate(open_trades, 1):
-        coin, tf, entry, targets, stop, reason, created_at = trade
-        response += (
-            f"#{i} | {coin} [{tf}]\n"
-            f"Вход: ${entry:.2f}\n"
-            f"Цель: {targets}\n"
-            f"Стоп: ${stop:.2f}\n"
-            f"Причина: {reason}\n"
-            f"Дата: {created_at.split(' ')[0]}\n"
-            f"---\n"
-        )
+    # Разбиваем значения по переменным
+    trade_id, coin, entry, usdt_amount, fee_entry_percent, created_at = row
 
-    await message.answer(response)
+    # Сохраняем в FSMContext
+    await state.set_state(CloseDealForm.closing_trade)
+    await state.update_data({
+        "selected_trade": {
+            "id": trade_id,
+            "coin": coin,
+            "entry": entry,
+            "created_at": created_at
+        },
+        "usdt_amount": usdt_amount,
+        "fee_entry_percent": fee_entry_percent
+    })
 
-# Команда /closetrade - закрытие открытой сделки с учетом комиссии
-@dp.message(F.text == "/closetrade")
-async def closetrade_start(message: Message, state: FSMContext):
-    trades = await db.get_open_trades(message.from_user.id)
+    # Показываем интерфейс черновика закрытия
+    await show_close_draft(callback, state)
+
+# Обработка кнопки ввода цены закрытия
+@dp.callback_query(F.data == "set_close_price")
+async def prompt_close_price(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+    ])
+    await state.set_state(CloseDealForm.entering_close_price)
+    await callback.message.edit_text("📉 Введи цену закрытия ($):", reply_markup=keyboard)
+
+
+# Обработка пользовательского ввода цены закрытия
+@dp.message(CloseDealForm.entering_close_price)
+async def receive_close_price(message: Message, state: FSMContext):
+    try:
+        price = float(message.text.strip())
+        await state.update_data(close_price=price)
+        await state.set_state(CloseDealForm.closing_trade)
+        await show_close_draft(message, state)
+    except ValueError:
+        await message.answer("❌ Введи корректное число.")
+
+
+# Обработка кнопки выбора комиссии
+@dp.callback_query(F.data == "set_close_fee")
+async def prompt_close_fee(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="0.1%", callback_data="close_fee:0.1"),
+            InlineKeyboardButton(text="0.18%", callback_data="close_fee:0.18")
+        ],
+        [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="close_fee:custom")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+    ])
+    await callback.message.edit_text("📊 Выбери комиссию на закрытие:", reply_markup=keyboard)
+
+
+# Обработка выбора фиксированной комиссии
+@dp.callback_query(F.data.startswith("close_fee:"))
+async def handle_close_fee(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+
+    if value == "custom":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+        ])
+        await state.set_state(CloseDealForm.entering_close_fee)
+        await callback.message.edit_text("✍️ Введи комиссию вручную (%):", reply_markup=keyboard)
+    else:
+        try:
+            await state.update_data(close_fee=float(value))
+            await state.set_state(CloseDealForm.closing_trade)
+            await show_close_draft(callback, state)
+        except ValueError:
+            await callback.message.answer("❌ Ошибка: некорректное значение комиссии.")
+
+# Обработка кнопки ручного ввода комиссии
+@dp.callback_query(F.data == "close_fee:custom")
+async def handle_custom_fee(callback: CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+    ])
+    await state.set_state(CloseDealForm.entering_close_fee)
+    await callback.message.edit_text("✍️ Введи комиссию вручную (%):", reply_markup=keyboard)
+
+
+# Обработка пользовательского ввода комиссии вручную
+@dp.message(CloseDealForm.entering_close_fee)
+async def receive_close_fee(message: Message, state: FSMContext):
+    try:
+        fee = float(message.text.strip())
+        await state.update_data(close_fee=fee)
+        await state.set_state(CloseDealForm.closing_trade)
+        await show_close_draft(message, state)
+    except ValueError:
+        await message.answer("❌ Введи корректное число.")
+
+# Обработка кнопка назад в show_trade_info
+@dp.callback_query(F.data == "back_to_open_trades")
+async def back_to_open_trades(callback: CallbackQuery):
+    trades = await db.get_open_trades(callback.from_user.id)
+
     if not trades:
-        await message.answer("😎 У тебя нет открытых сделок.")
+        await callback.message.edit_text("😎 У вас нет открытых сделок.")
         return
 
     buttons = []
-    for trade in trades:
-        trade_id, coin, entry, stop, targets = trade
-        label = f"{trade_id}: {coin} @ {entry}$ → Цель {targets}"
-        buttons.append(KeyboardButton(text=label))
+    for trade_id, coin, usdt_amount in trades:
+        text = f"{coin} - {usdt_amount:.2f} USDT"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"openinfo:{trade_id}")])
 
-    markup = ReplyKeyboardMarkup(keyboard=[buttons[i:i+1] for i in range(len(buttons))], resize_keyboard=True)
-    await state.set_state(TradeForm.close_trade_id)
-    await message.answer("Выбери сделку для закрытия:", reply_markup=markup)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(f"📂 У вас {len(trades)} открытых сделок:", reply_markup=keyboard)
 
-# Обработка выбора сделки для закрытия
-@dp.message(TradeForm.close_trade_id)
-async def select_trade_to_close(message: Message, state: FSMContext):
-    try:
-        trade_id = int(message.text.split(":")[0])
-    except:
-        await message.answer("❌ Неверный формат. Пожалуйста, выбери из списка.")
-        return
-
-    await state.update_data(trade_id=trade_id)
-    await state.set_state(TradeForm.close_price_input)
-    await message.answer("Введи цену закрытия ($):", reply_markup=types.ReplyKeyboardRemove())
-
-# Ввод цены закрытия
-@dp.message(TradeForm.close_price_input)
-async def input_close_price(message: Message, state: FSMContext):
-    try:
-        close_price = float(message.text.strip())
-    except:
-        await message.answer("❌ Введи число.")
-        return
-
-    await state.update_data(close_price_input=close_price)
-    await state.set_state(TradeForm.fee_exit)
-    await message.answer("📉 Введи комиссию при выходе (%):")
-
-# Ввод комиссии при выходе и расчет прибыли
-@dp.message(TradeForm.fee_exit)
-async def input_fee_exit(message: Message, state: FSMContext):
-    try:
-        fee_exit_percent = float(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введи число.")
-        return
-
-    await state.update_data(fee_exit_percent=fee_exit_percent)
+# Обработка кнопок "назад" при вводе цены и комиссии закрытия
+@dp.callback_query(F.data == "back_to_close_draft")
+async def back_to_close_draft(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
-    trade_id = data["trade_id"]
-    close_price = data["close_price_input"]
+    if "selected_trade" not in data:
+        await callback.message.edit_text("⚠️ Не удалось вернуться: информация о сделке не найдена.")
+        return
 
-    # Забираем необходимые значения из базы
-    async with aiosqlite.connect("trades.db") as conn:
-        async with conn.execute('''
-            SELECT entry, usdt_amount, fee_entry_percent
-            FROM trades
-            WHERE id = ?
-        ''', (trade_id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                await message.answer("❌ Сделка не найдена.")
-                return
-            entry, usdt_amount, fee_entry_percent = row
+    await state.set_state(CloseDealForm.closing_trade)
+    await show_close_draft(callback, state)
 
-    # Расчёт купленных монет с учётом комиссии на вход
-    coins_bought = (usdt_amount / entry) * (1 - fee_entry_percent / 100)
+# Подтверждение закрытия сделки (предупреждение + кнопка подтверждения)
+@dp.callback_query(F.data == "confirm_close_trade")
+async def confirm_close_warning(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    trade = data.get("selected_trade")
 
-    # Расчёт финальной выручки с учётом комиссии на выход
-    final_usdt = (coins_bought * close_price) * (1 - fee_exit_percent / 100)
+    if not trade:
+        await callback.message.edit_text("❌ Ошибка: сделка не выбрана.")
+        return
 
-    # Расчёт итоговой прибыли
-    profit_usdt = final_usdt - usdt_amount
+    close_price = data.get("close_price")
+    close_fee = data.get("close_fee")
 
-    # PnL в процентах
-    pnl = (profit_usdt / usdt_amount) * 100
+    # ЕСЛИ не указана цена или комиссия — предупреждаем и добавляем кнопку назад
+    if close_price is None or close_fee is None:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+        ])
+        await callback.message.edit_text(
+            "⚠️ Укажи цену закрытия и комиссию перед подтверждением.",
+            reply_markup=keyboard
+        )
+        return
 
-    # Сохраняем результат
-    await db.close_trade(
-        trade_id,
-        close_price,
-        round(pnl, 2),
-        round(profit_usdt, 2),
-        fee_exit_percent
+    # ЕСЛИ всё заполнено — выводим предупреждение и кнопку подтвердить
+    text = (
+        f"⚠️ Ты собираешься закрыть сделку по монете {trade['coin']}\n\n"
+        f"📉 Цена закрытия: {close_price}\n"
+        f"📊 Комиссия: {close_fee}%\n\n"
+        f"❗ После закрытия сделки изменения будут невозможны.\n\n"
+        f"Подтвердить закрытие?"
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="final_close_trade")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_close_draft")]
+    ])
+    await callback.message.edit_text(text, reply_markup=keyboard)
 
-    await message.answer(
-        f"✅ Сделка закрыта!\n"
-        f"📉 Цена закрытия: ${close_price}\n"
-        f"📈 PnL: {pnl:.2f}%\n"
-        f"💰 Профит: {profit_usdt:.2f} USDT"
-    )
+# Финальное закрытие сделки
+@dp.callback_query(F.data == "final_close_trade")
+async def finalize_close_trade(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    trade = data["selected_trade"]
+
+    entry = float(trade["entry"])
+    amount = float(data["usdt_amount"])
+    entry_fee = float(data["fee_entry_percent"])
+    close_price = float(data["close_price"])
+    close_fee = float(data["close_fee"])
+
+    # Кол-во купленных монет с учетом комиссии на вход
+    coins = (amount / entry) * (1 - entry_fee / 100)
+
+    # Финальная сумма в USDT
+    final_usdt = (coins * close_price) * (1 - close_fee / 100)
+
+    # Расчеты
+    profit = final_usdt - amount
+    pnl = (profit / amount) * 100
+
+    # Обновляем данные
+    data.update({
+        "status": "закрыта",
+        "close_price": close_price,
+        "fee_exit_percent": close_fee,
+        "profit_usdt": round(profit, 2),
+        "pnl": round(pnl, 2),
+        "closed_at": "CURRENT_TIMESTAMP"
+    })
+
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+    await db.insert_trade(user_id, chat_id, data)
     await state.clear()
+
+    text = (
+        f"✅ Сделка закрыта\n\n"
+        f"🪙 Монета: {trade['coin']}\n"
+        f"📥 Вход: ${entry}\n"
+        f"📉 Закрытие: ${close_price}\n"
+        f"💵 Сумма: {amount} USDT\n"
+        f"📈 PnL: {data['pnl']}%\n"
+        f"💰 Профит: {data['profit_usdt']} USDT"
+    )
+    await callback.message.edit_text(text)
+
+
+
+
+
+# 
+
+
+
+
+# 
+
+
+
+
+# 
 
 
 

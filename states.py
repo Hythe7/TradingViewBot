@@ -24,3 +24,9 @@ class TradeForm(StatesGroup):
     manual_close_fee = State()      # Для статуса закрыто вручную 
     manual_close_fee_select = State()   # Для статуса закрыто вручную 
     manual_close_fee_custom = State()   # Для статуса закрыто вручную 
+
+class CloseDealForm(StatesGroup):
+    selecting_trade = State()
+    entering_close_price = State()
+    entering_close_fee = State()
+    closing_trade = State()
