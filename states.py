@@ -18,5 +18,9 @@ class TradeForm(StatesGroup):
     tags = State()                   # Теги
     comment = State()                # Комментарий
     close_trade_id = State()
-    close_price_input = State()
+    close_price_input = State()     # При ручном закрытии
     fee_exit = State()
+    manual_close_price = State()    # Для статуса закрыто вручную 
+    manual_close_fee = State()      # Для статуса закрыто вручную 
+    manual_close_fee_select = State()   # Для статуса закрыто вручную 
+    manual_close_fee_custom = State()   # Для статуса закрыто вручную 
