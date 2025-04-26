@@ -5,11 +5,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from config import BOT_TOKEN
-from states import TradeForm, CloseDealForm
+from states import TradeForm, CloseDealForm, PeriodStates, CoinStatStates
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 import database as db
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types import CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from datetime import datetime, timedelta
+from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -837,17 +839,12 @@ async def finalize_close_trade(callback: CallbackQuery, state: FSMContext):
     close_price = float(data["close_price"])
     close_fee = float(data["close_fee"])
 
-    # Кол-во купленных монет с учетом комиссии на вход
     coins = (amount / entry) * (1 - entry_fee / 100)
-
-    # Финальная сумма в USDT
     final_usdt = (coins * close_price) * (1 - close_fee / 100)
 
-    # Расчеты
     profit = final_usdt - amount
     pnl = (profit / amount) * 100
 
-    # Обновляем данные
     data.update({
         "status": "закрыта",
         "close_price": close_price,
@@ -857,9 +854,7 @@ async def finalize_close_trade(callback: CallbackQuery, state: FSMContext):
         "closed_at": "CURRENT_TIMESTAMP"
     })
 
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    await db.insert_trade(user_id, chat_id, data)
+    await db.close_trade(trade['id'], data)
     await state.clear()
 
     text = (
@@ -878,7 +873,322 @@ async def finalize_close_trade(callback: CallbackQuery, state: FSMContext):
 
 
 # 
+# 
+# 
+# Кнопка "Статистика" 
 
+# Функция для подсчета статистики
+async def calculate_stats(trades: list) -> tuple[float, float, int, float]:
+    total_pnl = 0
+    total_profit = 0
+    win_count = 0
+
+    for trade in trades:
+        pnl = trade['pnl'] or 0
+        profit = trade['profit_usdt'] or 0
+
+        total_pnl += pnl
+        total_profit += profit
+        if pnl > 0:
+            win_count += 1
+
+    total_count = len(trades)
+    average_pnl = total_pnl / total_count if total_count else 0
+    winrate = (win_count / total_count) * 100 if total_count else 0
+
+    return average_pnl, total_profit, total_count, winrate
+
+
+# Универсальная функция получения текста и клавиатуры статистики
+async def get_main_statistics(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    first_day_of_month = today
+
+    closed_trades = await db.get_closed_trades_in_period(user_id, first_day_of_month, today)
+    open_trades = await db.get_open_trades_count(user_id)
+
+    if not closed_trades:
+        text = "❗ У тебя пока нет закрытых сделок в этом месяце."
+    else:
+        average_pnl, total_profit, count, winrate = await calculate_stats(closed_trades)
+
+        text = (
+            f"📊 Статистика за {now.strftime('%d.%m.%Y')}\n\n"
+            f"📈 Средний PnL: {average_pnl:.2f}%\n"
+            f"💰 Суммарный профит: {total_profit:.2f} USDT\n"
+            f"📋 Закрыто сделок: {count}\n"
+            f"🏆 Winrate: {winrate:.2f}%\n"
+            f"📂 Открытых сделок сейчас: {open_trades}\n\n"
+            f"Хочешь посмотреть более детальную статистику?\n👇 Выбери ниже:"
+        )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Статистика за период", callback_data="stat_period")],
+        [InlineKeyboardButton(text="🪙 Статистика по монете", callback_data="stat_coin")]
+    ])
+
+    return text, keyboard
+
+# Кнопка "Статистика" из главного меню
+@dp.message(F.text == "📊 Статистика")
+async def show_statistics(message: Message):
+    text, keyboard = await get_main_statistics(message.from_user.id)
+    await message.answer(text, reply_markup=keyboard)
+
+
+# Обработка кнопки "Статистика за период"
+@dp.callback_query(F.data == "stat_period")
+async def choose_period(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📆 За 7 дней", callback_data="period:7")],
+        [InlineKeyboardButton(text="📆 За 14 дней", callback_data="period:14")],
+        [InlineKeyboardButton(text="📆 За 30 дней", callback_data="period:30")],
+        [InlineKeyboardButton(text="✍️ Свой период", callback_data="period:custom")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_stats")]
+    ])
+    await callback.message.edit_text(
+        "📅 Выбери период для отображения статистики:",
+        reply_markup=keyboard
+    )
+
+# Обработка статистики по периоду
+# Универсальный обработчик выбора периода
+
+@dp.callback_query(F.data.startswith("period:"))
+async def handle_period_choice(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":")[1]
+
+    if choice == "custom":
+        # Переход на календарь для выбора даты начала
+        await state.set_state(PeriodStates.selecting_start_date)
+        await callback.message.edit_text("📅 Выбери дату начала периода:", reply_markup=await calendar_with_back("stat_period"))
+        return
+
+    days = int(choice)
+    now = datetime.now()
+    end_date = now.strftime("%Y-%m-%d")
+    start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    user_id = callback.from_user.id
+    closed_trades = await db.get_closed_trades_in_period(user_id, start_date, end_date)
+
+    if not closed_trades:
+        await callback.message.edit_text(f"❗ У тебя нет закрытых сделок за последние {days} дней.")
+        return
+
+    average_pnl, total_profit, count, winrate = await calculate_stats(closed_trades)
+
+    text = (
+        f"📅 Статистика за последние {days} дней\n\n"
+        f"📈 Средний PnL: {average_pnl:.2f}%\n"
+        f"💰 Суммарный профит: {total_profit:.2f} USDT\n"
+        f"📋 Закрыто сделок: {count}\n"
+        f"🏆 Winrate: {winrate:.2f}%\n\n"
+        f"🔙 Можешь вернуться назад:"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_period")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+# Обработчик выбора кастомного периода
+# Функция для календаря (с кнопкой "назад")
+async def calendar_with_back(callback_back: str) -> InlineKeyboardMarkup:
+    calendar_markup = await SimpleCalendar().start_calendar()
+    builder = InlineKeyboardBuilder()
+
+    for row in calendar_markup.inline_keyboard:
+        builder.row(*row)  # правильно добавить кнопки по рядам
+
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data=callback_back)
+    )
+
+    return builder.as_markup()
+
+
+# Сам обработчик
+@dp.callback_query(SimpleCalendarCallback.filter())
+async def process_calendar(callback: CallbackQuery, callback_data: dict, state: FSMContext):
+    calendar = SimpleCalendar()
+    selected, date = await calendar.process_selection(callback, callback_data)
+
+    if selected:
+        current_state = await state.get_state()
+
+        if current_state == PeriodStates.selecting_start_date:
+            await state.update_data(start_date=date.strftime("%Y-%m-%d"))
+            await state.set_state(PeriodStates.selecting_end_date)
+            await callback.message.edit_text(
+                "📅 Теперь выбери дату окончания периода:",
+                reply_markup=await calendar_with_back("stat_period")
+            )
+
+        elif current_state == PeriodStates.selecting_end_date:
+            data = await state.get_data()
+            start_date = data.get("start_date")
+            end_date = date.strftime("%Y-%m-%d")
+
+            if end_date < start_date:
+                await callback.message.edit_text(
+                    "❗ Дата окончания не может быть раньше даты начала. Выбери снова:",
+                    reply_markup=await calendar_with_back("stat_period")
+                )
+                return
+
+            # Получаем сделки
+            user_id = callback.from_user.id
+            closed_trades = await db.get_closed_trades_in_period(user_id, start_date, end_date)
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_period")]
+            ])
+
+            if not closed_trades:
+                await callback.message.edit_text(
+                    f"❗ Нет закрытых сделок за период {start_date} - {end_date}.",
+                    reply_markup=keyboard
+                )
+                await state.clear()
+                return
+
+            # Считаем статистику
+            average_pnl, total_profit, count, winrate = await calculate_stats(closed_trades)
+
+            text = (
+                f"📅 Статистика за период {start_date} - {end_date}\n\n"
+                f"📈 Средний PnL: {average_pnl:.2f}%\n"
+                f"💰 Суммарный профит: {total_profit:.2f} USDT\n"
+                f"📋 Закрыто сделок: {count}\n"
+                f"🏆 Winrate: {winrate:.2f}%\n\n"
+                f"🔙 Можешь вернуться назад:"
+            )
+
+            await callback.message.edit_text(text, reply_markup=keyboard)
+            await state.clear()
+
+
+
+# Обработка кнопки "Назад" к общей статистике
+@dp.callback_query(F.data == "back_to_main_stats")
+async def back_to_main_stats(callback: CallbackQuery):
+    text, keyboard = await get_main_statistics(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+
+
+# Обработка статистики по монете
+
+# Обработка кнопки "Статистика по монете"
+@dp.callback_query(F.data == "stat_coin")
+async def choose_coin(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    coins = await db.get_active_coins(user_id)
+
+    keyboard = InlineKeyboardBuilder()
+    for coin in coins:
+        keyboard.button(text=coin, callback_data=f"coin_stat:{coin}")
+    keyboard.button(text="✍️ Другая монета", callback_data="coin_stat_manual")
+    keyboard.button(text="🔙 Назад", callback_data="back_to_main_stats")
+    markup = keyboard.as_markup()
+
+    text = "🪙 Выбери монету из списка или укажи вручную.\n(Показаны монеты с активными или недавними сделками):"
+    await callback.message.edit_text(text, reply_markup=markup)
+
+# Выбор монеты из списка
+@dp.callback_query(F.data.startswith("coin_stat:"))
+async def show_coin_statistics(callback: CallbackQuery):
+    coin = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    stats = await db.get_coin_statistics(user_id, coin)
+    if not stats:
+        await callback.message.edit_text("❗ Нет данных по выбранной монете.", reply_markup=await back_to_coin_stats_keyboard())
+        return
+
+    text = (
+        f"📈 Статистика по монете {coin}\n\n"
+        f"📋 Всего сделок: {stats['total_trades']}\n"
+        f"📈 Общий PnL: {stats['average_pnl']:.2f}%\n"
+        f"💰 Общий профит: {stats['total_profit']:.2f} USDT\n"
+        f"🏆 Winrate: {stats['winrate']:.2f}%\n"
+        f"📅 Последняя сделка: {stats['last_trade_date'] or '-'}"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Статистика за период", callback_data="coin_stat_period")],
+        [InlineKeyboardButton(text="📜 История сделок", callback_data="coin_trade_history")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_coin")]
+    ])
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+# Обработка кнопки "Другая монета"
+@dp.callback_query(F.data == "coin_stat_manual")
+async def enter_manual_coin(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CoinStatStates.entering_manual_coin)
+    await callback.message.edit_text("✍️ Пришли монету в формате BTC/USDT:")
+
+# Обработка текстового ввода монеты
+@dp.message(CoinStatStates.entering_manual_coin)
+async def manual_coin_entered(message: Message, state: FSMContext):
+    coin = message.text.strip().upper()
+    user_id = message.from_user.id
+
+    stats = await db.get_coin_statistics(user_id, coin)
+    if not stats:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_coin")]
+        ])
+        await message.answer(f"❗ Нет данных по монете {coin}.", reply_markup=keyboard)
+        await state.clear()
+        return
+
+    text = (
+        f"📈 Статистика по монете {coin}\n\n"
+        f"📋 Всего сделок: {stats['total_trades']}\n"
+        f"📈 Общий PnL: {stats['average_pnl']:.2f}%\n"
+        f"💰 Общий профит: {stats['total_profit']:.2f} USDT\n"
+        f"🏆 Winrate: {stats['winrate']:.2f}%\n"
+        f"📅 Последняя сделка: {stats['last_trade_date'] or '-'}"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Статистика за период", callback_data="coin_stat_period")],
+        [InlineKeyboardButton(text="📜 История сделок", callback_data="coin_trade_history")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_coin")]
+    ])
+    await message.answer(text, reply_markup=keyboard)
+    await state.clear()
+
+# Функция возврата к выбору монеты
+async def back_to_coin_stats_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="stat_coin")]
+    ])
+    return keyboard
+
+
+
+
+# 
+
+
+# 
+
+
+# 
+
+
+
+# 
+
+
+
+# 
 
 
 
